@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit
  * @property confidence вероятность корректности диагнона в диапазоне 0.0 - 1.0
  * @property processingTime время выполнения анализа ML моделью в секундах
  * @property modelUsed идентификатор версии ML модели для трассируемости
+ * @property heatmap PNG-изображение с тепловой картой заражения (Grad-CAM) в base64, null если недоступно
  * @property error описание ошибки при неудачном анализе, null при успехе
  *
  * @see MalariaApiClient источник создания объектов данного класса
@@ -32,6 +33,7 @@ data class AnalysisResult(
     val confidence: Double,
     val processingTime: Double,
     val modelUsed: String,
+    val heatmap: String? = null,
     val error: String? = null
 )
 /**
@@ -172,11 +174,18 @@ object MalariaApiClient {
                 ?.get(1)
                 ?: "EfficientNet-B0"
 
+            // base64 не содержит кавычек, поэтому [^"]* безопасно захватывает всё значение
+            val heatmap = "\"heatmap\"\\s*:\\s*\"([^\"]*)\"".toRegex()
+                .find(json)
+                ?.groupValues
+                ?.get(1)
+
             AnalysisResult(
                 diagnosis = diagnosis,
                 confidence = confidence,
                 processingTime = processingTime,
-                modelUsed = modelUsed
+                modelUsed = modelUsed,
+                heatmap = heatmap
             )
         } catch (e: Exception) {
             null

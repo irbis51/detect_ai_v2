@@ -68,6 +68,9 @@ desktop-app/build/libs/
 .gradle/
 build/
 
+# Встроенный ML API (артефакт сборки PyInstaller, кладётся в дистрибутив)
+desktop-app/resources/
+
 # IDE/Gradle
 *.iml
 kapitol/
