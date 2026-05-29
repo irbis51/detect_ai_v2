@@ -16,13 +16,26 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import com.malaria.data.AnalysisRecord
 import com.malaria.repository.AnalysisRepository
+import com.malaria.utils.CsvExporter
+import java.awt.FileDialog
+import java.awt.Frame
+import java.io.File
 
+/**
+ * Экран истории анализов.
+ *
+ * Функции:
+ * - Отображение всех записей из БД (с расшифровкой через AnalysisRepository)
+ * - Фильтрация по диагнозу (в памяти после загрузки)
+ * - Экспорт всей истории в CSV через системный диалог сохранения файла
+ */
 @Composable
 fun HistoryScreen(
     onBackClick: () -> Unit,
 ) {
     var selectedFilter by remember { mutableStateOf<String?>(null) }
     var analyses by remember { mutableStateOf<List<AnalysisRecord>>(emptyList()) }
+    var exportMessage by remember { mutableStateOf<String?>(null) }
     val analysisRepository = remember { AnalysisRepository() }
 
     // Загружаем данные при открытии экрана и при изменении фильтра
@@ -53,114 +66,148 @@ fun HistoryScreen(
             color = Color.White
         )
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         Text(
             text = "Фильтр по результатам:",
-            fontSize = 18.sp,
-            color = Color.White,
-            modifier = Modifier.padding(bottom = 16.dp)
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            FilterCheckbox(
-                text = "Положительный 🦠",
-                isSelected = selectedFilter == "positive",
-                onClick = {
-                    selectedFilter = if (selectedFilter == "positive") null else "positive"
-                }
-            )
-
-            FilterCheckbox(
-                text = "Отрицательный 😍",
-                isSelected = selectedFilter == "negative",
-                onClick = {
-                    selectedFilter = if (selectedFilter == "negative") null else "negative"
-                }
-            )
-        }
-
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Text(
-            text = when {
-                selectedFilter == null -> "Все анализы (${analyses.size})"
-                selectedFilter == "positive" -> "Положительные анализы (${analyses.size})"
-                else -> "Отрицательные анализы (${analyses.size})"
-            },
             fontSize = 16.sp,
-            color = Color.White,
-            modifier = Modifier.padding(bottom = 16.dp)
+            color = Color.White
         )
 
-        if (analyses.isNotEmpty()) {
-            LazyColumn(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            ) {
-                items(analyses) { analysis ->
-                    AnalysisHistoryItem(analysis = analysis)
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-            }
-        } else {
-            Text(
-                text = "Нет сохраненных анализов",
-                fontSize = 16.sp,
-                color = Color.White,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(vertical = 32.dp),
-                textAlign = TextAlign.Center
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            FilterCheckbox(
+                label = "Все",
+                checked = selectedFilter == null,
+                onCheckedChange = { selectedFilter = null }
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            FilterCheckbox(
+                label = "Заражено",
+                checked = selectedFilter == "positive",
+                onCheckedChange = { selectedFilter = "positive" }
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            FilterCheckbox(
+                label = "Не заражено",
+                checked = selectedFilter == "negative",
+                onCheckedChange = { selectedFilter = "negative" }
             )
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        Button(
-            onClick = onBackClick,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Вернуться на главную", color = Color.White)
+        // Кнопка экспорта CSV
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Button(onClick = {
+                val all = analysisRepository.getAllAnalyses()
+                if (all.isEmpty()) {
+                    exportMessage = "История пуста — нечего экспортировать"
+                    return@Button
+                }
+                val dialog = FileDialog(null as Frame?, "Сохранить историю анализов", FileDialog.SAVE)
+                dialog.file = "malaria_history.csv"
+                dialog.isVisible = true
+                val name = dialog.file
+                val dir = dialog.directory
+                dialog.dispose()
+                if (name != null && dir != null) {
+                    val target = File(dir, if (name.endsWith(".csv")) name else "$name.csv")
+                    val result = CsvExporter.export(all, target)
+                    exportMessage = if (result.isSuccess)
+                        "✅ Экспортировано: ${result.getOrNull()} записей → ${target.name}"
+                    else
+                        "❌ Ошибка: ${result.exceptionOrNull()?.message}"
+                }
+            }) {
+                Text("📥 Экспорт в CSV")
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            exportMessage?.let {
+                Text(text = it, color = Color.White, fontSize = 13.sp)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        if (analyses.isEmpty()) {
+            Text(
+                text = "История анализов пуста",
+                fontSize = 16.sp,
+                color = Color.LightGray,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+        } else {
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(analyses) { analysis ->
+                    AnalysisHistoryItem(analysis)
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(onClick = onBackClick) {
+            Text("← Назад")
         }
     }
 }
 
 @Composable
-fun AnalysisHistoryItem(analysis: AnalysisRecord) {
-    Box(
+fun AnalysisHistoryItem(record: AnalysisRecord) {
+    val diagnosisColor = when (record.diagnosis) {
+        "parasitized" -> Color(0xFFFF5252)
+        "uninfected" -> Color(0xFF4CAF50)
+        else -> Color.Gray
+    }
+    val diagnosisText = when (record.diagnosis) {
+        "parasitized" -> "Заражено"
+        "uninfected" -> "Не заражено"
+        else -> record.diagnosis
+    }
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0xFF7A7A7A))
-            .padding(16.dp)
+            .padding(12.dp)
     ) {
-        Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
             Text(
-                text = analysis.fileName,
-                fontSize = 16.sp,
-                color = Color.White,
-                modifier = Modifier.padding(bottom = 4.dp)
-            )
-            Text(
-                text = "Результат: ${analysis.getRussianDiagnosis()}",
+                text = record.fileName,
                 fontSize = 14.sp,
-                color = if (analysis.diagnosis == "parasitized") Color(0xFFFF6B6B) else Color(0xFF4CAF50),
-                modifier = Modifier.padding(bottom = 2.dp)
+                color = Color.White
             )
             Text(
-                text = "Уверенность: ${(analysis.confidence * 100).toInt()}%",
+                text = diagnosisText,
+                fontSize = 14.sp,
+                color = diagnosisColor
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Вероятность: ${"%.1f".format(record.confidence * 100)}%",
                 fontSize = 12.sp,
-                color = Color.LightGray,
-                modifier = Modifier.padding(bottom = 2.dp)
+                color = Color.LightGray
             )
             Text(
-                text = "Дата: ${analysis.getFormattedDate()}",
-                fontSize = 10.sp,
+                text = record.analysisDate.toString().substringBefore("T").let { date ->
+                    val time = record.analysisDate.toString().substringAfter("T").substringBefore(".")
+                    "$date $time"
+                },
+                fontSize = 12.sp,
                 color = Color.LightGray
             )
         }

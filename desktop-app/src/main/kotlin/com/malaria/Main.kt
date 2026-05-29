@@ -8,6 +8,7 @@ import com.malaria.screens.AnalyzeScreen
 import com.malaria.screens.HistoryScreen
 import com.malaria.screens.AboutScreen
 import com.malaria.database.DatabaseManager
+import com.malaria.database.DatabaseBackup
 
 fun main() = application {
     DatabaseManager.init()
@@ -15,7 +16,10 @@ fun main() = application {
     var currentScreen by remember { mutableStateOf("main") }
 
     Window(
-        onCloseRequest = ::exitApplication,
+        onCloseRequest = {
+            DatabaseBackup.createBackup()
+            exitApplication()
+        },
         title = "AI Malaria Detection"
     ) {
         when (currentScreen) {
