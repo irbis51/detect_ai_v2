@@ -57,6 +57,45 @@ object MalariaApiClient {
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
+
+    suspend fun analyzeImage(imagePath: String): AnalysisResult {
+        val imageFile = File(imagePath)
+        if (!imageFile.exists()) {
+            return AnalysisResult(
+                diagnosis = "error",
+                confidence = 0.0,
+                processingTime = 0.0,
+                modelUsed = "EfficientNet-B0",
+                error = "Файл не найден"
+            )
+        }
+
+        return analyzeMalariaImage(imageFile) ?: AnalysisResult(
+            diagnosis = "error",
+            confidence = 0.0,
+            processingTime = 0.0,
+            modelUsed = "EfficientNet-B0",
+            error = "Не удалось получить ответ от ML сервера"
+        )
+    }
+
+    suspend fun isServerHealthy(): Boolean {
+        val request = Request.Builder()
+            .url("$BASE_URL/health")
+            .get()
+            .build()
+
+        return try {
+            withContext(Dispatchers.IO) {
+                client.newCall(request).execute().use { response ->
+                    response.isSuccessful
+                }
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     /**
      * Выполняет анализ изображения клеток крови на наличие малярийных плазмодиев
      *
@@ -92,15 +131,15 @@ object MalariaApiClient {
                 .post(requestBody)
                 .build()
 
-            val response = withContext(Dispatchers.IO) {
-                client.newCall(request).execute()
-            }
+            withContext(Dispatchers.IO) {
+                client.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string()
 
-            val responseBody = response.body?.string()
-
-            when (response.code) {
-                200 -> responseBody?.let { parseJsonResponse(it) }
-                else -> null
+                    when (response.code) {
+                        200 -> responseBody?.let { parseJsonResponse(it) }
+                        else -> null
+                    }
+                }
             }
         } catch (e: Exception) {
             null
@@ -115,9 +154,11 @@ object MalariaApiClient {
      */
     private fun parseJsonResponse(json: String): AnalysisResult? {
         return try {
-            val diagnosis = if (json.contains("\"diagnosis\":\"parasitized\"")) "parasitized"
-            else if (json.contains("\"diagnosis\":\"uninfected\"")) "uninfected"
-            else "error"
+            val diagnosis = "\"diagnosis\"\\s*:\\s*\"([^\"]+)\"".toRegex()
+                .find(json)
+                ?.groupValues
+                ?.get(1)
+                ?: "error"
 
             val confidenceMatch = "\"confidence\":\\s*([0-9.eE+-]+)".toRegex().find(json)
             val confidence = confidenceMatch?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
@@ -125,11 +166,17 @@ object MalariaApiClient {
             val processingTimeMatch = "\"processing_time\":\\s*([0-9.]+)".toRegex().find(json)
             val processingTime = processingTimeMatch?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
 
+            val modelUsed = "\"model_used\"\\s*:\\s*\"([^\"]+)\"".toRegex()
+                .find(json)
+                ?.groupValues
+                ?.get(1)
+                ?: "EfficientNet-B0"
+
             AnalysisResult(
                 diagnosis = diagnosis,
                 confidence = confidence,
                 processingTime = processingTime,
-                modelUsed = "EfficientNet-B0"
+                modelUsed = modelUsed
             )
         } catch (e: Exception) {
             null

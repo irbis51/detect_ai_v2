@@ -97,6 +97,43 @@ class AnalysisRepository {
         return getAllAnalyses().filter { it.diagnosis == diagnosis }
     }
 
+    fun deleteById(id: Long): Boolean {
+        return try {
+            val connection = DatabaseManager.getConnection()
+            val statement = connection.prepareStatement(
+                "DELETE FROM analysis_records WHERE id = ?"
+            )
+            statement.setLong(1, id)
+
+            val deletedRows = statement.executeUpdate()
+
+            statement.close()
+            connection.close()
+
+            deletedRows > 0
+        } catch (e: Exception) {
+            println("Ошибка удаления записи из БД: ${e.message}")
+            false
+        }
+    }
+
+    fun deleteAll(): Int {
+        return try {
+            val connection = DatabaseManager.getConnection()
+            val statement = connection.createStatement()
+
+            val deletedRows = statement.executeUpdate("DELETE FROM analysis_records")
+
+            statement.close()
+            connection.close()
+
+            deletedRows
+        } catch (e: Exception) {
+            println("Ошибка очистки истории в БД: ${e.message}")
+            0
+        }
+    }
+
     fun getFilteredAnalyses(
         diagnosis: String? = null,
         startDate: String? = null,
