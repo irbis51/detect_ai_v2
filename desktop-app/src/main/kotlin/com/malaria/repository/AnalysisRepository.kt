@@ -2,10 +2,23 @@ package com.malaria.repository
 
 import com.malaria.data.AnalysisRecord
 import com.malaria.database.DatabaseManager
+import com.malaria.security.CryptoManager
 import java.sql.ResultSet
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
+/**
+ * CRUD-операции с локальной SQLite базой данных.
+ *
+ * Поля image_path, file_name, diagnosis шифруются через [CryptoManager] (AES-256/GCM).
+ * Числовые поля и дата не шифруются — нужны для сортировки.
+ *
+ * Обратная совместимость: старые незашифрованные записи читаются корректно —
+ * [CryptoManager.decrypt] возвращает значение как есть если префикс "enc:v1:" отсутствует.
+ *
+ * Фильтрация выполняется в памяти после расшифровки, так как AES/GCM с рандомным IV
+ * делает WHERE по зашифрованному полю невозможным.
+ */
 class AnalysisRepository {
 
     fun saveAnalysis(record: AnalysisRecord): Long {
@@ -18,9 +31,9 @@ class AnalysisRepository {
             """
 
             val statement = connection.prepareStatement(sql, arrayOf("id"))
-            statement.setString(1, record.imagePath)
-            statement.setString(2, record.fileName)
-            statement.setString(3, record.diagnosis)
+            statement.setString(1, CryptoManager.encrypt(record.imagePath))
+            statement.setString(2, CryptoManager.encrypt(record.fileName))
+            statement.setString(3, CryptoManager.encrypt(record.diagnosis))
             statement.setDouble(4, record.confidence)
             statement.setDouble(5, record.processingTime)
             statement.setString(6, record.modelUsed)
@@ -46,20 +59,25 @@ class AnalysisRepository {
         return try {
             val connection = DatabaseManager.getConnection()
             val statement = connection.createStatement()
-            val resultSet: ResultSet = statement.executeQuery("SELECT * FROM analysis_records ORDER BY id DESC")
+            val resultSet: ResultSet = statement.executeQuery(
+                "SELECT * FROM analysis_records ORDER BY id DESC"
+            )
 
             val analyses = mutableListOf<AnalysisRecord>()
             while (resultSet.next()) {
                 analyses.add(
                     AnalysisRecord(
                         id = resultSet.getLong("id"),
-                        imagePath = resultSet.getString("image_path"),
-                        fileName = resultSet.getString("file_name"),
-                        diagnosis = resultSet.getString("diagnosis"),
+                        imagePath = CryptoManager.decrypt(resultSet.getString("image_path")),
+                        fileName = CryptoManager.decrypt(resultSet.getString("file_name")),
+                        diagnosis = CryptoManager.decrypt(resultSet.getString("diagnosis")),
                         confidence = resultSet.getDouble("confidence"),
                         processingTime = resultSet.getDouble("processing_time"),
                         modelUsed = resultSet.getString("model_used"),
-                        analysisDate = LocalDateTime.parse(resultSet.getString("analysis_date"), DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+                        analysisDate = LocalDateTime.parse(
+                            resultSet.getString("analysis_date"),
+                            DateTimeFormatter.ISO_LOCAL_DATE_TIME
+                        )
                     )
                 )
             }
@@ -75,9 +93,8 @@ class AnalysisRepository {
         }
     }
 
-    // Остальные методы пока оставь пустыми
     fun getAnalysesByDiagnosis(diagnosis: String): List<AnalysisRecord> {
-        return emptyList()
+        return getAllAnalyses().filter { it.diagnosis == diagnosis }
     }
 
     fun getFilteredAnalyses(
@@ -85,6 +102,12 @@ class AnalysisRepository {
         startDate: String? = null,
         endDate: String? = null
     ): List<AnalysisRecord> {
-        return emptyList()
+        val dateFmt = DateTimeFormatter.ISO_LOCAL_DATE
+        return getAllAnalyses().filter { r ->
+            val recordDate = r.analysisDate.format(dateFmt)
+            (diagnosis == null || r.diagnosis == diagnosis) &&
+            (startDate == null || recordDate >= startDate) &&
+            (endDate == null || recordDate <= endDate)
+        }
     }
 }

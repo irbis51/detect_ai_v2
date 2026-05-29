@@ -14,29 +14,23 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import java.awt.FileDialog
 import java.awt.Frame
-import java.io.File
 import com.malaria.components.AnalysisResult
 import com.malaria.components.MalariaApiClient
 import com.malaria.data.AnalysisRecord
 import com.malaria.repository.AnalysisRepository
+import com.malaria.utils.FileValidator
+
 /**
- * Главный экран анализа изображений клеток крови на малярию
+ * Главный экран анализа изображений клеток крови на малярию.
  *
- * Предоставляет полный интерфейс для загрузки изображений, отправки на ML анализ
- * и отображения диагностических результатов. Реализует state-менеджмент для
- * управления процессом анализа и обработки ошибок.
- *
- * ## Основной workflow:
+ * Workflow:
  * 1. Выбор файла через системный диалог
- * 2. Валидация формата изображения (PNG/JPEG)
+ * 2. Валидация: формат (PNG/JPEG) + размер (max 5 МБ) + разрешение (max 1280×720)
  * 3. Асинхронная отправка на ML сервер
  * 4. Отображение результатов с цветовой кодировкой
- * 5. Обработка ошибок сети и анализа
+ * 5. Сохранение в БД (поля зашифрованы через CryptoManager)
  *
  * @param onBackClick callback для возврата на главный экран
- *
- * @see MalariaApiClient клиент для взаимодействия с ML бэкендом
- * @see AnalysisResult модель данных для отображения результатов
  */
 @Composable
 fun AnalyzeScreen(onBackClick: () -> Unit) {
@@ -60,44 +54,25 @@ fun AnalyzeScreen(onBackClick: () -> Unit) {
         )
 
         Spacer(modifier = Modifier.height(32.dp))
+
         Text(
             text = "⚠️ Это приложение предназначено исключительно для вспомогательных целей " +
                     "и не заменяет профессиональную медицинскую консультацию.",
             fontSize = 12.sp,
-            color = Color(0xFFFFCCCB),
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0x80D32F2F))
-                .padding(12.dp)
+            color = Color(0xFFFFCC02)
         )
 
-        Button(
-            onClick = {
-                errorMessage = null
-                analysisResult = null
-                openFileDialog(
-                    onFileSelected = { filePath ->
-                        selectedFile = filePath
-                    },
-                    onError = { message ->
-                        errorMessage = message
-                    }
-                )
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Загрузить изображение", color = Color.White)
-        }
+        Spacer(modifier = Modifier.height(16.dp))
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Text(
+            text = "Поддерживаемые форматы: PNG, JPEG | Макс. размер: 5 МБ | Макс. разрешение: 1280×720",
+            fontSize = 11.sp,
+            color = Color(0xFFAAAAAA)
+        )
 
-        if (errorMessage != null) {
-            ErrorMessage(
-                message = errorMessage!!,
-                onDismiss = { errorMessage = null }
-            )
-        }
+        Spacer(modifier = Modifier.height(16.dp))
 
+        // Выбранный файл или кнопка выбора
         if (selectedFile != null) {
             FileItem(
                 filePath = selectedFile!!,
@@ -107,195 +82,117 @@ fun AnalyzeScreen(onBackClick: () -> Unit) {
                     analysisResult = null
                 }
             )
+        } else {
+            Button(onClick = {
+                openFileDialog(
+                    onFileSelected = { path ->
+                        selectedFile = path
+                        errorMessage = null
+                        analysisResult = null
+                    },
+                    onError = { error ->
+                        errorMessage = error
+                    }
+                )
+            }) {
+                Text("📁 Выбрать изображение")
+            }
+        }
+
+        // Сообщение об ошибке валидации
+        errorMessage?.let { error ->
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(text = "❌ $error", fontSize = 13.sp, color = Color(0xFFFF5252))
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (isLoading) {
-            Box(
-                modifier = Modifier.fillMaxWidth(),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(color = Color.White)
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-        analysisResult?.let { result ->
-            AnalysisResultView(result = result)
-            Spacer(modifier = Modifier.height(20.dp))
-        }
-
-        Button(
-            onClick = {
-                if (selectedFile != null && !isLoading) {
+        // Кнопка анализа
+        if (selectedFile != null && !isLoading) {
+            Button(onClick = {
+                coroutineScope.launch {
                     isLoading = true
-                    analysisResult = null
                     errorMessage = null
+                    try {
+                        val result = MalariaApiClient.analyzeImage(selectedFile!!)
+                        analysisResult = result
 
-                    coroutineScope.launch {
-                        try {
-                            val file = File(selectedFile!!)
-                            println("Отправляем файл: ${file.name}")
-                            val result = MalariaApiClient.analyzeMalariaImage(file)
-                            println("Получен результат: $result")
-
-                            if (result != null) {
-                                analysisResult = result
-                                println("Результат установлен в UI")
-                                try {
-                                    val record = AnalysisRecord(
-                                        imagePath = selectedFile!!,
-                                        fileName = getFileName(selectedFile!!),
-                                        diagnosis = result.diagnosis,
-                                        confidence = result.confidence,
-                                        processingTime = result.processingTime,
-                                        modelUsed = result.modelUsed
-                                    )
-                                    val savedId = analysisRepository.saveAnalysis(record) // используй существующий репозиторий
-                                    println("✅ Результат сохранен в БД с ID: $savedId")
-                                } catch (e: Exception) {
-                                    println("❌ Ошибка сохранения в БД: ${e.message}")
-                                }
-
-                            } else {
-                                errorMessage = "Не удалось подключиться к серверу анализа"
-                                println("Результат null")
-                            }
-
-                        } catch (e: Exception) {
-                            println("Ошибка: ${e.message}")
-                            errorMessage = "Ошибка: ${e.message}"
-
-                        } finally {
-                            isLoading = false
+                        if (result.error == null) {
+                            val record = AnalysisRecord(
+                                imagePath = selectedFile!!,
+                                fileName = getFileName(selectedFile!!),
+                                diagnosis = result.diagnosis,
+                                confidence = result.confidence,
+                                processingTime = result.processingTime,
+                                modelUsed = result.modelUsed
+                            )
+                            analysisRepository.saveAnalysis(record)
                         }
+                    } catch (e: Exception) {
+                        errorMessage = "Ошибка соединения с ML сервером: ${e.message}"
+                    } finally {
+                        isLoading = false
                     }
                 }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = selectedFile != null && !isLoading
-        ) {
-            Text(
-                if (isLoading) "Анализ..." else "Проанализировать изображение",
-                color = Color.Black
-            )
+            }) {
+                Text("🔬 Анализировать")
+            }
+        }
+
+        if (isLoading) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(12.dp))
+                Text("Анализ...", color = Color.White, fontSize = 14.sp)
+            }
+        }
+
+        // Результат анализа
+        analysisResult?.let { result ->
+            Spacer(modifier = Modifier.height(24.dp))
+            if (result.error != null) {
+                Text("❌ ${result.error}", fontSize = 14.sp, color = Color(0xFFFF5252))
+            } else {
+                val diagnosisRu = getRussianDiagnosis(result.diagnosis)
+                val diagnosisColor = if (result.diagnosis == "parasitized")
+                    Color(0xFFFF5252) else Color(0xFF4CAF50)
+
+                Column {
+                    Text("Диагноз:", fontSize = 16.sp, color = Color.White)
+                    Text(
+                        text = diagnosisRu,
+                        fontSize = 24.sp,
+                        color = diagnosisColor
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "Вероятность: ${"%.1f".format(result.confidence * 100)}%",
+                        fontSize = 14.sp,
+                        color = Color.White
+                    )
+                    Text(
+                        "Время обработки: ${"%.2f".format(result.processingTime)} сек",
+                        fontSize = 12.sp,
+                        color = Color.LightGray
+                    )
+                    Text(
+                        "Модель: ${result.modelUsed}",
+                        fontSize = 12.sp,
+                        color = Color.LightGray
+                    )
+                }
+            }
         }
 
         Spacer(modifier = Modifier.weight(1f))
 
-        Button(
-            onClick = onBackClick,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Вернуться на главную", color = Color.White)
+        Button(onClick = onBackClick) {
+            Text("← Назад")
         }
     }
 }
 
-/**
- * Компонент для отображения результатов анализа малярии
- *
- * Визуализирует диагностическую информацию с цветовой кодировкой
- *
- * @param result объект AnalysisResult с данными диагностики
- *
- * @see AnalysisResult модель данных для отображения
- */
-@Composable
-fun AnalysisResultView(result: AnalysisResult) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFF4A4A4A))
-            .padding(16.dp)
-    ) {
-        Text(
-            text = "Результат анализа:",
-            fontSize = 18.sp,
-            color = Color.White,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-
-        val diagnosisColor = if (result.diagnosis == "parasitized") Color(0xFFFF6B6B) else Color(0xFF4CAF50)
-        Text(
-            text = "Диагноз: ${getRussianDiagnosis(result.diagnosis)}",
-            fontSize = 16.sp,
-            color = diagnosisColor,
-            modifier = Modifier.padding(bottom = 4.dp)
-        )
-
-        Text(
-            text = "Уверенность: ${(result.confidence * 100).toInt()}%",
-            fontSize = 14.sp,
-            color = Color.White,
-            modifier = Modifier.padding(bottom = 4.dp)
-        )
-
-        Text(
-            text = "Время обработки: ${result.processingTime} сек",
-            fontSize = 12.sp,
-            color = Color.LightGray,
-            modifier = Modifier.padding(bottom = 4.dp)
-        )
-
-        Text(
-            text = "Модель: ${result.modelUsed}",
-            fontSize = 12.sp,
-            color = Color.LightGray
-        )
-    }
-}
-/**
- * Компонент отображения ошибок с возможностью закрытия
- *
- * Отображает сообщения об ошибках в красном контейнере с кнопкой закрытия.
- * Используется для показа сетевых ошибок и ошибок валидации.
- *
- * @param message текст ошибки для отображения
- * @param onDismiss callback для скрытия компонента ошибки
- */
-@Composable
-fun ErrorMessage(message: String, onDismiss: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFFD32F2F))
-            .padding(12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "Ошибка:",
-                fontSize = 14.sp,
-                color = Color.White
-            )
-            Text(
-                text = message,
-                fontSize = 12.sp,
-                color = Color.White,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-
-        Button(
-            onClick = onDismiss,
-            modifier = Modifier.height(36.dp),
-            colors = androidx.compose.material.ButtonDefaults.buttonColors(
-                backgroundColor = Color.White
-            )
-        ) {
-            Text("✕", color = Color.Red, fontSize = 14.sp)
-        }
-    }
-}
-/**
- * Компонент отображения информации о выбранном файле
- *
- * Показывает имя файла, путь и формат с возможностью удаления выбора.
- *
- * @param filePath полный путь к выбранному файлу
- * @param onRemove callback для удаления выбранного файла
- */
 @Composable
 fun FileItem(filePath: String, onRemove: () -> Unit) {
     Row(
@@ -306,11 +203,7 @@ fun FileItem(filePath: String, onRemove: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "Выбранный файл:",
-                fontSize = 14.sp,
-                color = Color.White
-            )
+            Text(text = "Выбранный файл:", fontSize = 14.sp, color = Color.White)
             Text(
                 text = getFileName(filePath),
                 fontSize = 12.sp,
@@ -324,21 +217,12 @@ fun FileItem(filePath: String, onRemove: () -> Unit) {
                 modifier = Modifier.padding(top = 2.dp)
             )
         }
-
-        Button(
-            onClick = onRemove,
-            modifier = Modifier.height(36.dp)
-        ) {
+        Button(onClick = onRemove, modifier = Modifier.height(36.dp)) {
             Text("✕", color = Color.Black, fontSize = 14.sp)
         }
     }
 }
-/**
- * Преобразует диагноз в русскоязычный вариант для UI
- *
- * @param englishDiagnosis диагноз на английском от ML модели
- * @return локализованный диагноз для отображения пользователю
- */
+
 private fun getRussianDiagnosis(englishDiagnosis: String): String {
     return when (englishDiagnosis) {
         "parasitized" -> "Заражено"
@@ -347,11 +231,10 @@ private fun getRussianDiagnosis(englishDiagnosis: String): String {
         else -> englishDiagnosis
     }
 }
+
 /**
- * Открывает системный диалог выбора файла для загрузки изображений
- *
- * @param onFileSelected callback при успешном выборе файла
- * @param onError callback при ошибке выбора файла
+ * Открывает диалог выбора файла.
+ * Валидация через [FileValidator]: формат + размер (5 МБ) + разрешение (1280×720).
  */
 private fun openFileDialog(
     onFileSelected: (String) -> Unit,
@@ -360,37 +243,24 @@ private fun openFileDialog(
     val fileDialog = FileDialog(null as Frame?, "Выберите изображение (PNG, JPEG)")
     fileDialog.mode = FileDialog.LOAD
     fileDialog.isMultipleMode = false
-
     fileDialog.isVisible = true
 
     val file = fileDialog.file
     val directory = fileDialog.directory
     fileDialog.dispose()
+
     if (file != null && directory != null) {
         val filePath = "$directory$file"
-        if (isSupportedFormat(filePath)) {
-            onFileSelected(filePath)
-        } else {
-            onError("Неподдерживаемый формат файла. Используйте PNG или JPEG.")
+        when (val result = FileValidator.validate(filePath)) {
+            is FileValidator.Result.Success -> onFileSelected(filePath)
+            is FileValidator.Result.Error -> onError(result.message)
         }
     }
 }
-/**
- * Проверяет поддержку формата файла для анализа
- *
- * @param filePath путь к файлу для проверки
- * @return true если формат поддерживается (PNG, JPG, JPEG)
- */
-private fun isSupportedFormat(filePath: String): Boolean {
-    val extension = filePath.substringAfterLast(".", "").lowercase()
-    return extension == "png" || extension == "jpg" || extension == "jpeg"
-}
-/**
- * Извлекает имя файла из полного пути
- *
- * @param filePath полный путь к файлу
- * @return только имя файла без пути
- */
+
 private fun getFileName(filePath: String): String {
     return filePath.substringAfterLast("\\").substringAfterLast("/")
 }
+
+/** Оставлен для обратной совместимости с FileValidationTest */
+fun isSupportedFormat(filePath: String): Boolean = FileValidator.isSupportedFormat(filePath)
