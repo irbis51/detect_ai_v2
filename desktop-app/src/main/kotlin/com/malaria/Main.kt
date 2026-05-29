@@ -9,14 +9,23 @@ import com.malaria.screens.HistoryScreen
 import com.malaria.screens.AboutScreen
 import com.malaria.database.DatabaseManager
 import com.malaria.database.DatabaseBackup
+import com.malaria.server.ApiServerManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 fun main() = application {
     DatabaseManager.init()
+
+    // Поднимаем встроенный ML API в фоне, чтобы не блокировать отрисовку окна.
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { ApiServerManager.startIfNeeded() }
+    }
 
     var currentScreen by remember { mutableStateOf("main") }
 
     Window(
         onCloseRequest = {
+            ApiServerManager.stop()
             DatabaseBackup.createBackup()
             exitApplication()
         },

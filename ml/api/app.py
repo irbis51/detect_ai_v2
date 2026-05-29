@@ -4,13 +4,37 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import models, transforms
 from PIL import Image
+import numpy as np
+import base64
 import io
+import os
+import sys
 import time
 import logging
 
-logging.basicConfig(level=logging.INFO)
+def _setup_logging() -> None:
+    """Логирование в файл, когда приложение собрано PyInstaller'ом (--windowed).
+
+    В windowed-сборке sys.stdout/stderr могут быть None, поэтому потоковые
+    обработчики уронили бы uvicorn. Пишем в ~/.malaria-detection/ml-api.log.
+    """
+    if getattr(sys, "frozen", False):
+        log_dir = os.path.join(os.path.expanduser("~"), ".malaria-detection")
+        os.makedirs(log_dir, exist_ok=True)
+        logging.basicConfig(
+            level=logging.INFO,
+            filename=os.path.join(log_dir, "ml-api.log"),
+            filemode="a",
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+    else:
+        logging.basicConfig(level=logging.INFO)
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Malaria Detection API")
@@ -34,9 +58,23 @@ val_tfms = transforms.Compose([
 ])
 
 
+def resource_path(name: str) -> str:
+    """Путь к файлу рядом с приложением.
+
+    Работает и при обычном запуске, и внутри собранного PyInstaller .exe,
+    где данные распаковываются в каталог sys._MEIPASS.
+    """
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
 def build_model() -> nn.Module:
-    """Функция создания модели"""
-    model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT)
+    """Функция создания модели.
+
+    weights=None — предобученные веса ImageNet не скачиваются (важно для
+    оффлайн-работы в .exe): все веса всё равно перезаписываются из best.pt.
+    """
+    model = models.efficientnet_b0(weights=None)
     for p in model.features.parameters():
         p.requires_grad = False
     model.classifier = nn.Sequential(
@@ -49,12 +87,78 @@ def build_model() -> nn.Module:
 # загрузка модели
 try:
     model = build_model()
-    model.load_state_dict(torch.load('best.pt', map_location=device))
+    model.load_state_dict(torch.load(resource_path('best.pt'), map_location=device))
     model.eval()
     logger.info("Model loaded successfully")
 except Exception as e:
     logger.error(f"Error loading model: {e}")
     model = None
+
+
+def _jet_colormap(gray: np.ndarray) -> np.ndarray:
+    """Переводит карту значений HxW в [0,1] в RGB HxWx3 (палитра JET)."""
+    r = np.clip(1.5 - np.abs(4.0 * gray - 3.0), 0.0, 1.0)
+    g = np.clip(1.5 - np.abs(4.0 * gray - 2.0), 0.0, 1.0)
+    b = np.clip(1.5 - np.abs(4.0 * gray - 1.0), 0.0, 1.0)
+    return (np.stack([r, g, b], axis=-1) * 255.0).astype(np.uint8)
+
+
+def generate_gradcam_overlay(image_tensor: torch.Tensor,
+                             original_image: Image.Image,
+                             predicted_class: int) -> str | None:
+    """Grad-CAM по последнему сверточному слою EfficientNet-B0.
+
+    Строит тепловую карту зон, на которые «смотрела» модель при постановке
+    диагноза, и накладывает её на исходное изображение. Возвращает PNG
+    в base64 либо None, если что-то пошло не так (диагноз при этом не страдает).
+    """
+    if model is None:
+        return None
+    try:
+        target_layer = model.features[-1]
+        activations: dict[str, torch.Tensor] = {}
+        gradients: dict[str, torch.Tensor] = {}
+
+        def forward_hook(_module, _inp, out):
+            activations["v"] = out
+            out.register_hook(lambda grad: gradients.__setitem__("v", grad))
+
+        handle = target_layer.register_forward_hook(forward_hook)
+        try:
+            inp = image_tensor.clone().requires_grad_(True)
+            model.zero_grad(set_to_none=True)
+            output = model(inp)
+            score = output[0, predicted_class]
+            score.backward()
+        finally:
+            handle.remove()
+
+        acts = activations["v"].detach()[0]           # [C, h, w]
+        grads = gradients["v"].detach()[0]            # [C, h, w]
+        weights = grads.mean(dim=(1, 2))              # [C]
+        cam = torch.relu((weights[:, None, None] * acts).sum(dim=0))  # [h, w]
+        cam = cam - cam.min()
+        cam = cam / (cam.max() + 1e-8)
+        cam_np = cam.cpu().numpy()
+
+        # Увеличиваем карту до размера исходного изображения
+        w, h = original_image.size
+        cam_img = Image.fromarray((cam_np * 255).astype(np.uint8)).resize(
+            (w, h), Image.BILINEAR
+        )
+        cam_resized = np.asarray(cam_img).astype(np.float32) / 255.0
+
+        heat = _jet_colormap(cam_resized).astype(np.float32)
+        base = np.asarray(original_image.convert("RGB")).astype(np.float32)
+        alpha = 0.45
+        overlay = (alpha * heat + (1.0 - alpha) * base).clip(0, 255).astype(np.uint8)
+
+        buf = io.BytesIO()
+        Image.fromarray(overlay).save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as e:
+        logger.error(f"Grad-CAM error: {e}")
+        return None
 
 
 def predict(image_data: bytes) -> dict:
@@ -72,19 +176,25 @@ def predict(image_data: bytes) -> dict:
         with torch.no_grad():
             output = model(image_tensor)
             probs = torch.softmax(output, dim=1)
-            predicted_class = output.argmax(1)[0]
+            predicted_class = int(output.argmax(1)[0].item())
             confidence = probs[0][predicted_class].item()
+
+        # Тепловая карта зоны заражения (Grad-CAM)
+        heatmap_b64 = generate_gradcam_overlay(image_tensor, image, predicted_class)
 
         processing_time = time.time() - start_time
 
         diagnosis = "parasitized" if predicted_class == 0 else "uninfected"
 
-        return {
+        result = {
             "diagnosis": diagnosis,
             "confidence": confidence,
             "processing_time": round(processing_time, 2),
             "model_used": "EfficientNet-B0"
         }
+        if heatmap_b64:
+            result["heatmap"] = heatmap_b64
+        return result
 
     except Exception as e:
         logger.error(f"Prediction error: {e}")
@@ -145,4 +255,6 @@ async def model_info():
 
 if __name__ == "__main__":
     logger.info("Starting ML API server on http://localhost:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    # 127.0.0.1 — локальный сервер для desktop-приложения (без firewall-запроса
+    # и без выхода в сеть). log_config=None — используем настроенный выше root-логгер.
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info", log_config=None)

@@ -56,8 +56,12 @@ compose.desktop {
         mainClass = "com.malaria.MainKt"
 
         nativeDistributions {
-            // ДОБАВЬ ЭТУ СТРОКУ:
             modules("java.sql", "java.naming", "java.management", "jdk.unsupported")
+
+            // Встроенный ML API (api-server.exe из PyInstaller) кладётся в
+            // resources/windows/ и попадает в дистрибутив. В рантайме путь
+            // доступен через системное свойство compose.application.resources.dir.
+            appResourcesRootDir.set(project.file("resources"))
 
             targetFormats(
                     org.jetbrains.compose.desktop.application.dsl.TargetFormat.Pkg,

@@ -1,5 +1,6 @@
 package com.malaria.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -24,6 +25,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.malaria.components.AnalysisResult
@@ -40,6 +44,7 @@ import java.awt.dnd.DropTarget
 import java.awt.dnd.DropTargetAdapter
 import java.awt.dnd.DropTargetDragEvent
 import java.awt.dnd.DropTargetDropEvent
+import java.util.Base64
 import javax.swing.BorderFactory
 import javax.swing.JLabel
 import javax.swing.JPanel
@@ -218,6 +223,32 @@ fun AnalyzeScreen(onBackClick: () -> Unit) {
                         fontSize = 12.sp,
                         color = Color.LightGray
                     )
+
+                    result.heatmap?.let { base64 ->
+                        val heatmapBitmap = remember(base64) { decodeBase64ToImageBitmap(base64) }
+                        if (heatmapBitmap != null) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                "Зона заражения (Grad-CAM):",
+                                fontSize = 14.sp,
+                                color = Color.White
+                            )
+                            Text(
+                                "Красным выделены участки, повлиявшие на диагноз модели",
+                                fontSize = 11.sp,
+                                color = Color(0xFFAAAAAA)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Image(
+                                bitmap = heatmapBitmap,
+                                contentDescription = "Тепловая карта зоны заражения",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(320.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -326,6 +357,15 @@ fun FileItem(filePath: String, onRemove: () -> Unit) {
             Text("✕", color = Color.Black, fontSize = 14.sp)
         }
     }
+}
+
+/** Декодирует base64-PNG (тепловую карту Grad-CAM) в ImageBitmap для отрисовки в Compose. */
+private fun decodeBase64ToImageBitmap(base64: String): ImageBitmap? = try {
+    val bytes = Base64.getDecoder().decode(base64)
+    org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()
+} catch (e: Exception) {
+    println("⚠️ Не удалось декодировать тепловую карту: ${e.message}")
+    null
 }
 
 private fun getRussianDiagnosis(englishDiagnosis: String): String {
